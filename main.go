@@ -1,9 +1,11 @@
 package main
 
 import (
-	"fmt"
+	"encoding/json"
 	"log"
 	"net/http"
+	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 )
@@ -13,13 +15,16 @@ var upgrader = websocket.Upgrader{
 	WriteBufferSize: 1024,
 }
 
+var clients sync.Map
+
 func main() {
+	go updateActiveConnections()
+
 	http.HandleFunc("/ws", wsHandler)
 	log.Fatal(http.ListenAndServe(":8080", nil))
 }
 
 func wsHandler(w http.ResponseWriter, r *http.Request) {
-	// prevent websocket: request origin not allowed by Upgrader.CheckOrigin
 	upgrader.CheckOrigin = func(r *http.Request) bool { return true }
 
 	conn, err := upgrader.Upgrade(w, r, nil)
@@ -29,19 +34,47 @@ func wsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close()
 
+	clients.Store(conn, true)
+
 	for {
-		messageType, message, err := conn.ReadMessage()
+		_, _, err := conn.ReadMessage()
+		if err != nil {
+			log.Println(err)
+			break
+		}
+	}
+
+	clients.Delete(conn)
+}
+
+func updateActiveConnections() {
+	for {
+		activeConnections := make([]string, 0)
+
+		clients.Range(func(key, value interface{}) bool {
+			// key is the connection, value is not used
+			activeConnections = append(activeConnections, "Active Connection")
+			return true
+		})
+
+		message, err := json.Marshal(map[string]interface{}{
+			"activeConnections": activeConnections,
+		})
 		if err != nil {
 			log.Println(err)
 			return
 		}
 
-		fmt.Println("Received message:", string(message))
+		clients.Range(func(key, value interface{}) bool {
+			conn := key.(*websocket.Conn)
+			err := conn.WriteMessage(websocket.TextMessage, message)
+			if err != nil {
+				log.Println(err)
+				return false
+			}
+			return true
+		})
 
-		err = conn.WriteMessage(messageType, message)
-		if err != nil {
-			log.Println(err)
-			return
-		}
+		time.Sleep(1 * time.Second)
 	}
 }
